@@ -1,0 +1,11 @@
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+client-python/src/rpg_client/generated/battle_pb2.py
+client-python/src/rpg_client/generated/battle_pb2.pyi
+client-python/src/rpg_client/generated/battle_pb2_grpc.py
+
+npm-debug.log*

@@ -1,0 +1,19 @@
+{
+  "name": "rpg-battle-grpc-server",
+  "version": "1.0.0",
+  "description": "Servidor Node.js gRPC para batalha RPG distribuida.",
+  "main": "src/server.js",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && node --check src/gameState.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.6",
+    "@grpc/proto-loader": "^0.7.15"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

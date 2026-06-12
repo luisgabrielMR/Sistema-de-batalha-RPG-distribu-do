@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import argparse
+import importlib
+import sys
+from pathlib import Path
+from typing import Any
+
+import grpc
+from rich import box
+from rich.align import Align
+from rich.columns import Columns
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
+
+APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parents[2]
+PROTO_DIR = PROJECT_ROOT / "proto"
+PROTO_FILE = PROTO_DIR / "battle.proto"
+GENERATED_DIR = APP_DIR / "generated"
+
+DEFAULT_TARGET = "localhost:50051"
+PLAYER_NAME = "Guerreiro"
+
+
+def ensure_generated_proto(console: Console | None = None) -> None:
+    """Generate Python gRPC stubs when they are missing or older than the proto."""
+    generated_files = [
+        GENERATED_DIR / "battle_pb2.py",
+        GENERATED_DIR / "battle_pb2_grpc.py",
+    ]
+    proto_mtime = PROTO_FILE.stat().st_mtime
+    needs_generation = any(not file.exists() or file.stat().st_mtime < proto_mtime for file in generated_files)
+
+    if not needs_generation:
+        return
+
+    try:
+        from grpc_tools import protoc
+    except ImportError as exc:
+        raise RuntimeError(
+            "grpcio-tools nao esta instalado. Rode: python -m pip install -r client-python/requirements.txt"
+        ) from exc
+
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    (GENERATED_DIR / "__init__.py").touch()
+
+    result = protoc.main(
+        [
+            "grpc_tools.protoc",
+            f"-I{PROTO_DIR}",
+            f"--python_out={GENERATED_DIR}",
+            f"--pyi_out={GENERATED_DIR}",
+            f"--grpc_python_out={GENERATED_DIR}",
+            str(PROTO_FILE),
+        ]
+    )
+
+    if result != 0:
+        raise RuntimeError(f"Falha ao gerar stubs Python do gRPC. Codigo: {result}")
+
+    if console:
+        console.print("[dim]Stubs Python gerados a partir de proto/battle.proto.[/dim]")
+
+
+def load_grpc_modules() -> tuple[Any, Any]:
+    if str(GENERATED_DIR) not in sys.path:
+        sys.path.insert(0, str(GENERATED_DIR))
+
+    battle_pb2 = importlib.import_module("battle_pb2")
+    battle_pb2_grpc = importlib.import_module("battle_pb2_grpc")
+    return battle_pb2, battle_pb2_grpc
+
+
+def hp_color(percent: float) -> str:
+    if percent > 0.55:
+        return "green"
+    if percent > 0.25:
+        return "yellow"
+    return "red"
+
+
+def hp_bar(current: int, maximum: int, width: int = 12) -> Text:
+    percent = current / maximum if maximum else 0
+    filled = round(percent * width)
+    empty = width - filled
+    color = hp_color(percent)
+
+    text = Text("HP: ", style="bold")
+    text.append("[", style="dim")
+    text.append("#" * filled, style=color)
+    text.append("-" * empty, style="dim")
+    text.append("] ", style="dim")
+    text.append(f"{current}/{maximum}", style=color)
+    return text
+
+
+def combatant_panel(combatant: Any, border_style: str) -> Panel:
+    title = Text(combatant.name, style="bold")
+    status = Text.assemble(
+        ("VIVO" if combatant.alive else "DERROTADO", "bold green" if combatant.alive else "bold red"),
+    )
+
+    body = Group(
+        title,
+        Text(combatant.role, style="dim"),
+        hp_bar(combatant.hp, combatant.max_hp),
+        status,
+    )
+    return Panel(body, border_style=border_style, box=box.ROUNDED, padding=(1, 2))
+
+
+def log_panel(state: Any, last_message: str) -> Panel:
+    table = Table.grid(expand=True)
+    table.add_column(ratio=1)
+
+    if last_message:
+        table.add_row(Text(f"[RPC] {last_message}", style="bold cyan"))
+
+    for item in state.log[-6:]:
+        table.add_row(Text(f"- {item}", style="white"))
+
+    return Panel(table, title="LOG", border_style="cyan", box=box.ROUNDED)
+
+
+def actions_panel(state: Any) -> Panel:
+    table = Table.grid(padding=(0, 3))
+    table.add_column(justify="left")
+    table.add_column(justify="left")
+    table.add_row("[bold]1[/bold] Atacar", f"[bold]2[/bold] Usar pocao ({state.potions_left})")
+    table.add_row("[bold]3[/bold] Atualizar status", "[bold]4[/bold] Reiniciar batalha")
+    table.add_row("[bold]0[/bold] Sair", "")
+    return Panel(table, title="ACOES", border_style="magenta", box=box.ROUNDED)
+
+
+def outcome_text(battle_pb2: Any, outcome: int) -> Text:
+    if outcome == battle_pb2.PLAYER_WON:
+        return Text("VITORIA DO JOGADOR", style="bold green")
+    if outcome == battle_pb2.MONSTER_WON:
+        return Text("VITORIA DO DRAGAO", style="bold red")
+    return Text("BATALHA EM ANDAMENTO", style="bold yellow")
+
+
+def render_screen(console: Console, battle_pb2: Any, state: Any, last_message: str = "") -> None:
+    console.clear()
+    console.print(Rule("[bold cyan]STATUS DA BATALHA[/bold cyan]"))
+    console.print(
+        Align.center(
+            Columns(
+                [
+                    combatant_panel(state.player, "green"),
+                    combatant_panel(state.monster, "red"),
+                ],
+                equal=True,
+                expand=True,
+            )
+        )
+    )
+    console.print(log_panel(state, last_message))
+    console.print(actions_panel(state))
+    console.print(Align.center(outcome_text(battle_pb2, state.outcome)))
+
+
+def call_status(stub: Any, battle_pb2: Any) -> Any:
+    return stub.GetStatus(battle_pb2.StatusRequest(), timeout=5)
+
+
+def run_demo(stub: Any, battle_pb2: Any, console: Console) -> None:
+    reset_result = stub.ResetBattle(battle_pb2.ResetRequest(), timeout=5)
+    attack_result = stub.Attack(battle_pb2.ActionRequest(actor_name=PLAYER_NAME), timeout=5)
+
+    state = attack_result.state
+    render_screen(console, battle_pb2, state, attack_result.message or reset_result.message)
+    console.print("[bold green]Demo gRPC concluida: ResetBattle e Attack responderam com sucesso.[/bold green]")
+
+
+def run_interactive(stub: Any, battle_pb2: Any, console: Console) -> None:
+    last_message = "Conectado ao servidor gRPC."
+    state = call_status(stub, battle_pb2)
+
+    while True:
+        render_screen(console, battle_pb2, state, last_message)
+
+        if state.outcome != battle_pb2.BATTLE_IN_PROGRESS:
+            choice = Prompt.ask("Batalha encerrada. [4] Reiniciar ou [0] Sair", choices=["4", "0"], default="4")
+        else:
+            choice = Prompt.ask("Escolha sua acao", choices=["1", "2", "3", "4", "0"], default="1")
+
+        try:
+            if choice == "1":
+                result = stub.Attack(battle_pb2.ActionRequest(actor_name=PLAYER_NAME), timeout=5)
+                state = result.state
+                last_message = result.message
+            elif choice == "2":
+                result = stub.UsePotion(battle_pb2.ActionRequest(actor_name=PLAYER_NAME), timeout=5)
+                state = result.state
+                last_message = result.message
+            elif choice == "3":
+                state = call_status(stub, battle_pb2)
+                last_message = "Status atualizado pelo servidor."
+            elif choice == "4":
+                result = stub.ResetBattle(battle_pb2.ResetRequest(), timeout=5)
+                state = result.state
+                last_message = result.message
+            elif choice == "0":
+                console.print("[bold cyan]Ate a proxima batalha.[/bold cyan]")
+                return
+        except grpc.RpcError as exc:
+            last_message = f"Erro gRPC: {exc.details() or exc.code().name}"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Cliente Rich para RPG distribuido via gRPC.")
+    parser.add_argument("--target", default=DEFAULT_TARGET, help=f"Endereco do servidor gRPC. Padrao: {DEFAULT_TARGET}")
+    parser.add_argument("--demo", action="store_true", help="Executa uma rodada automatica e sai.")
+    parser.add_argument("--generate-only", action="store_true", help="Apenas gera os stubs Python a partir do .proto.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    console = Console()
+
+    ensure_generated_proto(console)
+    if args.generate_only:
+        console.print("[bold green]Stubs Python prontos.[/bold green]")
+        return
+
+    battle_pb2, battle_pb2_grpc = load_grpc_modules()
+
+    try:
+        with grpc.insecure_channel(args.target) as channel:
+            grpc.channel_ready_future(channel).result(timeout=5)
+            stub = battle_pb2_grpc.BattleServiceStub(channel)
+
+            if args.demo:
+                run_demo(stub, battle_pb2, console)
+            else:
+                run_interactive(stub, battle_pb2, console)
+    except grpc.FutureTimeoutError:
+        console.print(f"[bold red]Nao consegui conectar em {args.target}.[/bold red]")
+        console.print("Inicie o servidor com: npm --prefix server-node start")
+
+
+if __name__ == "__main__":
+    main()
