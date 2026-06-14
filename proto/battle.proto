@@ -77,4 +77,5 @@ message FileTransferResult {
   string message = 2;
   string file_name = 3;
   int64 size_bytes = 4;
+  string processed_file_name = 5;
 }

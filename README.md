@@ -74,6 +74,25 @@ Abra outro terminal para o backend consumidor Python:
 .\scripts\run_client.ps1
 ```
 
+No modo interativo, cada acao escolhida no menu tambem passa por arquivo:
+
+1. O Python gera `client-python/generated-requests/acao_batalha.txt`.
+2. O Python envia esse arquivo ao servidor usando `FileService.UploadFile`.
+3. O servidor executa a acao no backend Node.js.
+4. O servidor atualiza `server-node/storage/estado_batalha.txt`.
+5. O servidor gera `server-node/storage/resultado_acao_batalha.txt`.
+6. O Python baixa os arquivos atualizados para `client-python/downloads/`.
+
+Para ver os arquivos enquanto testa:
+
+```powershell
+Get-Content client-python\generated-requests\acao_batalha.txt
+Get-Content server-node\storage\estado_batalha.txt
+Get-Content server-node\storage\resultado_acao_batalha.txt
+Get-Content client-python\downloads\estado_batalha.txt
+Get-Content client-python\downloads\resultado_acao_batalha.txt
+```
+
 ## Demo automatica
 
 Com o servidor rodando, execute:
@@ -152,10 +171,22 @@ arquivo no servidor:
 server-node/storage/resultado_acao_batalha.txt
 ```
 
+O servidor tambem atualiza o snapshot geral:
+
+```text
+server-node/storage/estado_batalha.txt
+```
+
 Depois o Python baixa esse resultado para:
 
 ```text
 client-python/downloads/resultado_acao_batalha.txt
+```
+
+No modo interativo, o Python tambem baixa:
+
+```text
+client-python/downloads/estado_batalha.txt
 ```
 
 Tambem e possivel trocar a acao:

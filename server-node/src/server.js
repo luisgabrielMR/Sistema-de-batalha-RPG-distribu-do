@@ -14,6 +14,7 @@ const STORAGE_DIR = path.resolve(__dirname, '../storage');
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 const FILE_CHUNK_SIZE = 64 * 1024;
 const ACTION_FILE_PATTERN = /^\s*acao\s*=/im;
+const STATE_FILE_NAME = 'estado_batalha.txt';
 const INVALID_FILE_NAME_PATTERN = /[<>:"|?*\x00-\x1F]/;
 const RESERVED_WINDOWS_FILE_NAMES = new Set([
   'CON',
@@ -105,10 +106,30 @@ function createServer() {
   const server = new grpc.Server();
 
   server.addService(battlePackage.BattleService.service, {
-    getStatus: handleRpc(() => game.status()),
-    attack: handleRpc((request) => game.attack(request.actor_name)),
-    usePotion: handleRpc((request) => game.usePotion(request.actor_name)),
-    resetBattle: handleRpc(() => game.resetBattle()),
+    getStatus: handleRpc(() => {
+      const state = game.status();
+      writeStateSnapshot('GetStatus', {
+        success: true,
+        message: 'Status consultado.',
+        state,
+      });
+      return state;
+    }),
+    attack: handleRpc((request) => {
+      const result = game.attack(request.actor_name);
+      writeStateSnapshot('Attack', result);
+      return result;
+    }),
+    usePotion: handleRpc((request) => {
+      const result = game.usePotion(request.actor_name);
+      writeStateSnapshot('UsePotion', result);
+      return result;
+    }),
+    resetBattle: handleRpc(() => {
+      const result = game.resetBattle();
+      writeStateSnapshot('ResetBattle', result);
+      return result;
+    }),
   });
 
   server.addService(battlePackage.FileService.service, {
@@ -192,6 +213,7 @@ function uploadFile(call, callback) {
         message,
         file_name: fileName,
         size_bytes: totalBytes,
+        processed_file_name: processedFile?.file_name || '',
       });
     } catch (error) {
       fail(grpc.status.INTERNAL, error.message || 'Falha ao salvar arquivo no servidor.');
@@ -225,6 +247,7 @@ function processActionFile(fileName, content) {
   }
 
   fs.writeFileSync(path.join(STORAGE_DIR, resultFileName), output, 'utf8');
+  writeStateSnapshot(`Arquivo ${fileName}`, result);
   return {
     file_name: resultFileName,
     size_bytes: Buffer.byteLength(output, 'utf8'),
@@ -287,6 +310,39 @@ function formatActionResultFile(requestFileName, action, actor, result) {
     `Mensagem: ${result.message}`,
     '',
     'Estado da batalha:',
+    `Jogador: ${state.player.name}`,
+    `HP jogador: ${state.player.hp}/${state.player.max_hp}`,
+    `Jogador vivo: ${state.player.alive ? 'sim' : 'nao'}`,
+    '',
+    `Inimigo: ${state.monster.name}`,
+    `HP inimigo: ${state.monster.hp}/${state.monster.max_hp}`,
+    `Inimigo vivo: ${state.monster.alive ? 'sim' : 'nao'}`,
+    '',
+    `Turno: ${state.turn}`,
+    `Pocoes restantes: ${state.potions_left}`,
+    `Resultado da batalha: ${state.outcome}`,
+    '',
+    'Log recente:',
+    ...state.log.map((item) => `- ${item}`),
+    '',
+  ];
+
+  return lines.join('\n');
+}
+
+function writeStateSnapshot(source, result) {
+  ensureStorageDir();
+  fs.writeFileSync(path.join(STORAGE_DIR, STATE_FILE_NAME), formatStateSnapshot(source, result), 'utf8');
+}
+
+function formatStateSnapshot(source, result) {
+  const state = result.state;
+  const lines = [
+    'Estado atual da batalha processado pelo servidor gRPC Node.js',
+    `Origem da atualizacao: ${source}`,
+    `Sucesso: ${result.success ? 'sim' : 'nao'}`,
+    `Mensagem: ${result.message}`,
+    '',
     `Jogador: ${state.player.name}`,
     `HP jogador: ${state.player.hp}/${state.player.max_hp}`,
     `Jogador vivo: ${state.player.alive ? 'sim' : 'nao'}`,

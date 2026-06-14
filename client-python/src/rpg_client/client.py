@@ -29,6 +29,7 @@ PLAYER_NAME = "Guerreiro"
 SAMPLE_FILE = PROJECT_ROOT / "client-python" / "sample-files" / "ficha_heroi.txt"
 DOWNLOAD_DIR = PROJECT_ROOT / "client-python" / "downloads"
 REQUEST_DIR = PROJECT_ROOT / "client-python" / "generated-requests"
+STATE_FILE_NAME = "estado_batalha.txt"
 CHUNK_SIZE = 64 * 1024
 INVALID_FILE_NAME_CHARS = set('<>:"/\\|?*')
 RESERVED_WINDOWS_FILE_NAMES = {
@@ -313,6 +314,36 @@ def result_file_name_for(request_file: Path) -> str:
     return f"resultado_{request_file.stem}{request_file.suffix or '.txt'}"
 
 
+def extract_result_message(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("Mensagem: "):
+            return line.removeprefix("Mensagem: ").strip()
+    return "Arquivo de estado atualizado pelo servidor."
+
+
+def execute_action_file(
+    file_stub: Any,
+    battle_pb2: Any,
+    action: str,
+    actor: str = PLAYER_NAME,
+) -> tuple[Path, str, Any]:
+    request_file = write_action_request_file(action, actor, REQUEST_DIR)
+    upload_result = upload_file(file_stub, battle_pb2, request_file)
+    result_name = getattr(upload_result, "processed_file_name", "") or result_file_name_for(request_file)
+    downloaded = download_file(file_stub, battle_pb2, result_name, DOWNLOAD_DIR)
+    return downloaded, downloaded.read_text(encoding="utf8"), upload_result
+
+
+def refresh_state_file(
+    battle_stub: Any,
+    file_stub: Any,
+    battle_pb2: Any,
+) -> tuple[Any, Path]:
+    state = call_status(battle_stub, battle_pb2)
+    state_file = download_file(file_stub, battle_pb2, STATE_FILE_NAME, DOWNLOAD_DIR)
+    return state, state_file
+
+
 def run_action_file_demo(
     file_stub: Any,
     battle_pb2: Any,
@@ -324,16 +355,14 @@ def run_action_file_demo(
     request_file = write_action_request_file(action, actor, REQUEST_DIR)
     console.print(f"[cyan]Arquivo de requisicao gerado:[/cyan] {request_file}")
 
-    upload_result = upload_file(file_stub, battle_pb2, request_file)
+    downloaded, result_text, upload_result = execute_action_file(file_stub, battle_pb2, action, actor)
     console.print(f"[green]Upload OK:[/green] {upload_result.message} ({upload_result.size_bytes} bytes)")
 
-    result_name = result_file_name_for(request_file)
     files_response = list_files(file_stub, battle_pb2)
     print_file_list(console, files_response)
 
-    downloaded = download_file(file_stub, battle_pb2, result_name, DOWNLOAD_DIR)
     console.print(f"[green]Resultado baixado:[/green] {downloaded}")
-    console.print(Panel(downloaded.read_text(encoding="utf8"), title=result_name, border_style="green", box=box.ROUNDED))
+    console.print(Panel(result_text, title=downloaded.name, border_style="green", box=box.ROUNDED))
 
 
 def run_demo(battle_stub: Any, file_stub: Any, battle_pb2: Any, console: Console) -> None:
@@ -348,9 +377,10 @@ def run_demo(battle_stub: Any, file_stub: Any, battle_pb2: Any, console: Console
     console.print("[bold green]Demo gRPC concluida com batalha e transferencia de arquivo.[/bold green]")
 
 
-def run_interactive(stub: Any, battle_pb2: Any, console: Console) -> None:
-    last_message = "Conectado ao servidor gRPC."
-    state = call_status(stub, battle_pb2)
+def run_interactive(battle_stub: Any, file_stub: Any, battle_pb2: Any, console: Console) -> None:
+    _, result_text, _ = execute_action_file(file_stub, battle_pb2, "status", PLAYER_NAME)
+    state, state_file = refresh_state_file(battle_stub, file_stub, battle_pb2)
+    last_message = f"{extract_result_message(result_text)} Estado salvo em {state_file.name}."
 
     while True:
         render_screen(console, battle_pb2, state, last_message)
@@ -362,25 +392,27 @@ def run_interactive(stub: Any, battle_pb2: Any, console: Console) -> None:
 
         try:
             if choice == "1":
-                result = stub.Attack(battle_pb2.ActionRequest(actor_name=PLAYER_NAME), timeout=5)
-                state = result.state
-                last_message = result.message
+                _, result_text, _ = execute_action_file(file_stub, battle_pb2, "attack", PLAYER_NAME)
+                state, state_file = refresh_state_file(battle_stub, file_stub, battle_pb2)
+                last_message = f"{extract_result_message(result_text)} Estado salvo em {state_file.name}."
             elif choice == "2":
-                result = stub.UsePotion(battle_pb2.ActionRequest(actor_name=PLAYER_NAME), timeout=5)
-                state = result.state
-                last_message = result.message
+                _, result_text, _ = execute_action_file(file_stub, battle_pb2, "use_potion", PLAYER_NAME)
+                state, state_file = refresh_state_file(battle_stub, file_stub, battle_pb2)
+                last_message = f"{extract_result_message(result_text)} Estado salvo em {state_file.name}."
             elif choice == "3":
-                state = call_status(stub, battle_pb2)
-                last_message = "Status atualizado pelo servidor."
+                _, result_text, _ = execute_action_file(file_stub, battle_pb2, "status", PLAYER_NAME)
+                state, state_file = refresh_state_file(battle_stub, file_stub, battle_pb2)
+                last_message = f"{extract_result_message(result_text)} Estado salvo em {state_file.name}."
             elif choice == "4":
-                result = stub.ResetBattle(battle_pb2.ResetRequest(), timeout=5)
-                state = result.state
-                last_message = result.message
+                _, result_text, _ = execute_action_file(file_stub, battle_pb2, "reset", PLAYER_NAME)
+                state, state_file = refresh_state_file(battle_stub, file_stub, battle_pb2)
+                last_message = f"{extract_result_message(result_text)} Estado salvo em {state_file.name}."
             elif choice == "0":
                 console.print("[bold cyan]Ate a proxima batalha.[/bold cyan]")
                 return
-        except grpc.RpcError as exc:
-            last_message = f"Erro gRPC: {exc.details() or exc.code().name}"
+        except (grpc.RpcError, FileNotFoundError, OSError, ValueError) as exc:
+            details = exc.details() if isinstance(exc, grpc.RpcError) else str(exc)
+            last_message = f"Erro no fluxo gRPC/arquivo: {details or type(exc).__name__}"
 
 
 def run_file_commands(args: argparse.Namespace, file_stub: Any, battle_pb2: Any, console: Console) -> None:
@@ -447,7 +479,7 @@ def main() -> None:
             elif args.upload or args.list_files or args.download:
                 run_file_commands(args, file_stub, battle_pb2, console)
             else:
-                run_interactive(battle_stub, battle_pb2, console)
+                run_interactive(battle_stub, file_stub, battle_pb2, console)
     except grpc.FutureTimeoutError:
         console.print(f"[bold red]Nao consegui conectar em {args.target}.[/bold red]")
         console.print("Inicie o servidor com: npm --prefix server-node start")
